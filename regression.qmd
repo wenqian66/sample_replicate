@@ -1,0 +1,608 @@
+---
+title: "ws_appendix"
+format: pdf
+editor: visual
+---
+
+## replicate the paper F. Li(2008).
+
+```{r, include = FALSE, echo: false}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(fixest)
+library(stringr)
+library(summarytools)
+library(knitr)
+library(ggplot2)
+library(patchwork)
+library(lubridate)
+library(mice)
+library(lfe)
+library(stargazer)
+library(DescTools)
+
+
+
+final <- read_csv("final.csv")
+final$filing_date <- as.Date(final$filing_date, format="%m/%d/%Y")
+final$year <- year(final$filing_date)
+final$profit_dummy = ifelse(final$Earnings >= 0, 1, 0)
+```
+
+#Table 1
+
+##(A) Summary statistics;
+
+```{r}
+#| echo: false
+final <- final %>% 
+  group_by(cik) %>%
+  arrange(cik, year) %>% 
+  mutate(fog_diff = fog_index - lag(fog_index),
+         length_diff = length - lag(length),
+         bog_diff = bogindex - lag(bogindex),
+         mda_fog_diff = mda_fog_index - lag(mda_fog_index),
+         mda_length_diff = mda_length - lag(mda_length)) %>% 
+  ungroup()
+
+vars <- c("Earnings", "mtb", "mve", "at", 
+          "fog_index", "fog_diff", "length", "length_diff", "bogindex", "bog_diff",
+          "mda_fog_index", "mda_fog_diff", "mda_length", "mda_length_diff")
+
+summary_df <- descr(final[vars], 
+                    stats = c("mean", "med", "sd", "q1", "q3", "n.valid"),
+                    transpose = TRUE) 
+
+original_order <- c("Book value of assets (\\$MM)", "Bog(t) - Bog(t-1)","Bog", "Earnings", 
+                    "Fog(t) - Fog(t-1)", "Fog", "Length", "Length(t) - length(t-1)",
+                    "(Fog(t) - Fog(t-1))(MD&A)", "Fog(MD&A)", "Length(MD&A)", "(Length(t) - length(t-1))(MD&A)",
+                    "Market-to-book", "Market value of equity (\\$MM)")
+desired_order <- c("Earnings", "Market-to-book", "Market value of equity (\\$MM)", "Book value of assets (\\$MM)",
+                   "Fog", "Fog(t) - Fog(t-1)", "Length", "Length(t) - length(t-1)","Bog","Bog(t) - Bog(t-1)",
+                   "Fog(MD&A)", "(Fog(t) - Fog(t-1))(MD&A)", "Length(MD&A)", "(Length(t) - length(t-1))(MD&A)")
+rownames(summary_df) <- original_order
+name_mapping <- setNames(desired_order, original_order)
+summary_df1 <- summary_df[name_mapping[rownames(summary_df)], ]
+summary_df1 <- data.frame(summary_df1)
+colnames(summary_df1) <- c("Mean", "Median", "Std. Dev", "25th", "75th","N")
+summary_df1[1:5] <- lapply(summary_df1[1:5], function(x) sprintf("%.2f", x))
+summary_df1[] <- lapply(summary_df1, as.character)
+year_stats <- as.data.frame(t(data.frame(Year = c("-", "2019", "-", "2017", "2020", "18626")))) #2016-2021
+colnames(year_stats) <- c("Mean", "Median", "Std. Dev", "25th", "75th","N")
+
+combined_df <- bind_rows(year_stats, summary_df1)
+
+kable(combined_df, format = "html", escape = FALSE)
+
+```
+
+#Fig. 1. ##(A) Median Fog and Length of the whole annual report by calendar year of the filing date.
+
+```{r,warning=FALSE}
+#| echo: false
+med <- final %>%
+  group_by(year) %>% 
+  summarise(
+    med_fog = median(fog_index, na.rm = TRUE),
+    med_mdafog = median(mda_fog_index, na.rm = TRUE),
+    med_length = median(length, na.rm = TRUE),
+    med_mdalength = median(mda_length, na.rm = TRUE),
+    med_bog = median(bogindex, na.rm = TRUE))
+
+#The whole annual report
+range_fog <- max(med$med_fog) - min(med$med_fog)
+range_length <- max(med$med_length) - min(med$med_length)
+scale_factor <- range_fog / range_length
+
+adjusted_length <- (med$med_length - min(med$med_length)) * scale_factor + min(med$med_fog)
+expanded_y_min <- min(med$med_fog, min(adjusted_length)) - 0.1 * range_fog
+expanded_y_max <- max(med$med_fog, max(adjusted_length)) + 0.1 * range_fog
+
+p1 <- ggplot(med, aes(x = year)) +
+  geom_line(aes(y = med_fog, colour = "Fog"), size = 1) +
+  geom_point(aes(y = med_fog, colour = "Fog"), shape = 15, fill = "#C39BD3",size = 2) +
+  geom_line(aes(y = adjusted_length, colour = "Length"), size = 1) +
+  geom_point(aes(y = adjusted_length, colour = "Length"), shape = 17, fill = "#FFD700",size = 2) +
+  scale_y_continuous(
+    name = "Fog",
+    limits = c(expanded_y_min, expanded_y_max), 
+    sec.axis = sec_axis(~(. - min(med$med_fog)) / scale_factor + min(med$med_length), name = "Length")) +
+  scale_colour_manual(values = c("Fog" = "#C39BD3", "Length" = "#FFD700")) +
+  labs(title = "Fig. 1A. The whole annual report") +
+  theme_minimal() +
+  theme(
+    legend.position = "top",  
+    legend.justification = "left")
+
+p2 <- ggplot(med, aes(x = year)) +
+  geom_line(aes(y = med_bog), size = 1, color = "blue") +
+  geom_point(aes(y = med_bog),size = 2, color = "blue") +
+  labs(title = "Fig. 1B. The whole annual report",
+       x = "Year",  
+       y = "Bog") +
+  theme_minimal()
+
+p1
+p2
+
+```
+
+##(B) Median Fog and Length of the MD&A section by calendar year of the filing date.
+
+```{r,warning=FALSE}
+#| echo: false
+#MD&A Section
+range_fog <- max(med$med_mdafog) - min(med$med_mdafog)
+range_length <- max(med$med_mdalength) - min(med$med_mdalength)
+scale_factor <- range_fog / range_length
+adjusted_length <- (med$med_mdalength - min(med$med_mdalength)) * scale_factor + min(med$med_mdafog)
+
+expanded_y_min <- min(med$med_mdafog, adjusted_length) - 0.1 * range_fog
+expanded_y_max <- max(med$med_mdafog, adjusted_length) + 0.1 * range_fog
+
+ggplot(med, aes(x = year)) +
+  geom_line(aes(y = med_mdafog, colour = "Fog"), size = 1) +
+  geom_point(aes(y = med_mdafog, colour = "Fog"), shape = 15, fill = "#C39BD3",size = 2) +
+  geom_line(aes(y = adjusted_length, colour = "Length"), size = 1) +
+  geom_point(aes(y = adjusted_length, colour = "Length"), shape = 17, fill = "#FFD700",size = 2) +
+  scale_y_continuous(
+    name = "Fog",
+    limits = c(expanded_y_min, expanded_y_max),
+    sec.axis = sec_axis(~ (. - min(med$med_mdafog)) / scale_factor + min(med$med_mdalength), name = "Length")
+  ) +
+  scale_colour_manual(values = c("Fog" = "#C39BD3", "Length" = "#FFD700")) +
+  labs(title = "Fig. 2.MD&A Section") +
+  theme_minimal()+
+  theme(
+    legend.position = "top",  
+    legend.justification = "left")
+
+
+```
+
+#Table 2
+
+##(A) Summary statistics of the determinants of Fog and Length;
+
+```{r}
+#| echo: false
+vars <- c("age", "si", "RET_VOL", "EARN_VOL", 
+          "NBSEG", "NGSEG", "NITEMS", "SEO", "MA", "DLW")
+
+summary_df <- descr(final[vars], 
+                    stats = c("mean", "med", "sd", "q1", "q3", "n.valid"),
+                    transpose = TRUE) 
+
+original_order <- c("AGE", "DLW","EARN_VOL", "MA", "NBSEG", "NGSEG", "NITEMS", "RET_VOL", "SEO", "SI")
+desired_order <- c("AGE", "SI", "RET_VOL","EARN_VOL", "NBSEG", "NGSEG","NITEMS", "SEO", "MA", "DLW")
+rownames(summary_df) <- original_order
+name_mapping <- setNames(desired_order, original_order)
+summary_df1 <- summary_df[name_mapping[rownames(summary_df)], ]
+summary_df1 <- data.frame(summary_df1)
+colnames(summary_df1) <- c("Mean", "Median", "Std. Dev", "25th", "75th","N")
+summary_df1[1:5] <- lapply(summary_df1[1:5], function(x) sprintf("%.2f", x))
+summary_df1[] <- lapply(summary_df1, as.character)
+summary_df1[c("SEO", "MA","DLW"), c("Median", "Std. Dev", "25th", "75th")] <- "-"
+kable(summary_df1, format = "html")
+```
+
+##(B) Determinants of Fog;
+
+```{r, include = FALSE,warning=FALSE}
+#| echo: false
+final$sic2 <- substr(final$sic, 1, 2)
+final <- final %>%
+  arrange(cik, year) %>%  
+  group_by(cik) %>%
+  mutate(
+    Earnings_change = Earnings - lag(Earnings),  
+    Earnings_change_d = ifelse(Earnings_change > 0, 1, 0),
+    earn_t1 = lead(Earnings,1),
+    earn_t2 = lead(Earnings,2)) %>%
+  ungroup()
+
+#Imputation
+imp <- mice(final[c("mda_fog_diff","mda_length_diff","mda_fog_index","mda_length","fog_index",
+                    "length","profit_dummy","Earnings","Earnings_change","Earnings_change_d","earn_t1","earn_t2",
+                    "fog_diff","length_diff","bog_diff","bogindex","mve","mtb","size","NBSEG",
+                    "NGSEG", "RET_VOL","EARN_VOL","si","age","NITEMS","SEO","MA","DLW","year","sic2")],
+            method = c('','','','','' ,'','','','','','','','','','','','pmm', 'pmm', 'pmm', 'pmm', 'pmm', 'pmm',
+                       'pmm','pmm','','','','','','',''), seed = 66)
+final_imp <- complete(imp, 1) 
+#winsorization 
+final_imp$Earnings_change <- 
+  Winsorize(final_imp$Earnings_change, quantile(final_imp$Earnings_change, probs=c(0.01, 0.99), na.rm = TRUE))
+final_imp$Earnings_change_d <- 
+  Winsorize(final_imp$Earnings_change_d, quantile(final_imp$Earnings_change_d, probs=c(0.01, 0.99), na.rm = TRUE))
+final_imp$mda_fog_diff <- 
+  Winsorize(final_imp$mda_fog_diff, quantile(final_imp$mda_fog_diff, probs=c(0.01, 0.99), na.rm = TRUE))
+final_imp$mda_length_diff <- 
+  Winsorize(final_imp$mda_length_diff, quantile(final_imp$mda_length_diff, probs=c(0.01, 0.99), na.rm = TRUE))
+```
+
+```{r,warning=FALSE}
+#| echo: false
+model1 <- felm(fog_index ~ size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model2 <- felm(mda_fog_index ~ size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+stargazer(
+  model1, model2, 
+  type = "text",
+  out = "~/Desktop/t1.txt",
+  title = "Regression Results of Fog",
+  dep.var.labels = c("Fog of the whole annual report","Fog of the MD&A section"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+```
+
+##(C) Determinants of Length
+
+```{r,warning=FALSE}
+#| echo: false
+model3 <- felm(length ~ size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model4 <- felm(mda_length ~ size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+stargazer(
+  model3, model4, 
+  type = "text",
+  out = "~/Desktop/t2.txt",
+  title = "Regression Results of Length",
+  dep.var.labels = c("Length of the whole annual report","Length of the MD&A section"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+```
+
+```{r,warning=FALSE}
+#| echo: false
+model5 <- felm(bogindex ~ size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+
+stargazer(
+  model5, 
+  type = "text",
+  out = "~/Desktop/t3.txt",
+  title = "Regression Results of Bog Index",
+  dep.var.labels = c("Bog of the whole annual report"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes"),
+    c("Industry dummies", "Yes"),
+    c("Cluster", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+```
+
+#Table 3 ##(A) Firm performance and annual report Fog and Length (level specification);
+
+```{r,warning=FALSE}
+#| echo: false
+model6 <- felm(fog_index ~ Earnings + size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model7 <- felm(fog_index ~ profit_dummy + size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA +DLW|year+ sic2|0|sic2,
+                data = final_imp)
+
+model8 <- felm(length ~ Earnings + size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model9 <- felm(length ~ profit_dummy + size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW|year+ sic2|0|sic2,
+                data = final_imp)
+
+model10 <- felm(bogindex ~ Earnings + size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA +DLW|year+ sic2|0|sic2,
+                data = final_imp)
+model11 <- felm(bogindex ~ profit_dummy + size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA +DLW|year+ sic2|0|sic2,
+                data = final_imp)
+
+stargazer(
+  model6, model7, model8, model9, model10, model11,
+  type = "text",
+  out = "~/Desktop/t4.txt",
+  title = "Firm performance and annual report Fog and Length (level specification) in Whole annual report",
+  dep.var.labels = c("Fog","Length","Bog"),
+  keep = c("Earnings", "profit_dummy"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes","Yes", "Yes","Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes","Yes", "Yes","Yes", "Yes"),
+    c("Control variables", "Yes", "Yes","Yes", "Yes","Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2", "Sic2", "Sic2","Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+
+```
+
+```{r,warning=FALSE}
+#| echo: false
+model12 <- felm(mda_fog_index~Earnings+size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model13 <- felm(mda_fog_index~profit_dummy+size + mtb+ age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA +DLW|year+ sic2|0|sic2,
+                data = final_imp)
+
+model14 <- felm(mda_length~Earnings+size + mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model15 <- felm(mda_length~profit_dummy+size + mtb+ age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA +DLW|year+ sic2|0|sic2,
+                data = final_imp)
+
+stargazer(
+  model12, model13, model14, model15,
+  type = "text",
+  out = "~/Desktop/t5.txt",
+  title = "Firm performance and annual report Fog and Length (level specification) in MD&A Section",
+  dep.var.labels = c("Fog","Length"),
+  keep = c("Earnings", "profit_dummy"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Control variables", "Yes", "Yes","Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2", "Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+```
+
+##(B) Firm performance and annual report Fog and Length (change specification)
+
+```{r,warning=FALSE}
+#| echo: false
+model16 <- felm(fog_diff~Earnings_change+size+mtb+ age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model17 <- felm(fog_diff~Earnings_change_d+size+mtb +age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA +DLW|year+ sic2|0|sic2,
+                data = final_imp)
+
+model18 <- felm(length_diff~Earnings_change+size+mtb+age+ si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model19 <- felm(length_diff ~Earnings_change_d+size+mtb+age+ si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA +DLW|year+ sic2|0|sic2,
+                data = final_imp)
+
+model20 <- felm(bog_diff~Earnings_change+size+mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model21 <- felm(bog_diff~Earnings_change_d+size+ mtb + age + si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA +DLW|year+ sic2|0|sic2,
+                data = final_imp)
+
+stargazer(
+  model16, model17, model18, model19, model20, model21,
+  type = "text",
+  out = "~/Desktop/t6.txt",
+  title = "Firm performance and annual report Fog and Length (change specification) in Whole annual report",
+  dep.var.labels = c("ΔFog","ΔLength","ΔBog"),
+  keep = c("Earnings", "profit_dummy"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes","Yes", "Yes","Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes","Yes", "Yes","Yes", "Yes"),
+    c("Control variables", "Yes", "Yes","Yes", "Yes","Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2", "Sic2", "Sic2","Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+```
+
+```{r,warning=FALSE}
+#| echo: false
+model22 <- felm(mda_fog_diff~Earnings_change+size+mtb+age+si+ RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model23 <- felm(mda_fog_diff~Earnings_change_d+size+mtb+age+si + RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA +DLW|year+ sic2|0|sic2,
+                data = final_imp)
+
+model24 <- felm(mda_length_diff~Earnings_change+size+mtb+age+si+RET_VOL+ EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA + DLW| year + sic2|0|sic2,
+                data = final_imp)
+model25 <- felm(mda_length_diff~Earnings_change_d+size+mtb+age+si+RET_VOL + EARN_VOL + NBSEG + NGSEG + NITEMS + SEO + MA +DLW|year+ sic2|0|sic2,
+                data = final_imp)
+
+stargazer(
+  model22, model23, model24, model25,
+  type = "text",
+  out = "~/Desktop/t7.txt",
+  title = "Firm performance and annual report Fog and Length (change specification) in MD&A Section",
+  dep.var.labels = c("ΔFog","ΔLength"),
+  keep = c("Earnings", "profit_dummy"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Control variables", "Yes", "Yes","Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2", "Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+```
+
+#Table 4 ##(A) Earnings persistence and annual report Fog index (profit firm-years);
+
+```{r,warning=FALSE}
+#| echo: false
+final_imp1 <- final_imp %>% filter(profit_dummy == 1)
+model26 <- felm(earn_t1~Earnings+fog_index+Earnings*fog_index+size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+model27 <- felm(earn_t2~Earnings+fog_index+Earnings*fog_index+size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+
+model28 <- felm(earn_t1~Earnings+mda_fog_index+Earnings*mda_fog_index
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+model29 <- felm(earn_t2~Earnings+mda_fog_index+Earnings*mda_fog_index
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+
+stargazer(
+  model26, model27, model28, model29,
+  type = "text",
+  out = "~/Desktop/t8.txt",
+  title = "Earnings Persistence and Annual Report Fog Index (Profit Firm-Years)",
+  keep = c("Earnings", "fog_index","mda_fog_index","Earnings:fog_index","Earnings:mda_fog_index"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Control variables", "Yes", "Yes","Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2", "Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+
+```
+
+##(B) earnings persistence and annual report Length (profit firmyears);
+
+```{r,warning=FALSE}
+#| echo: false
+model30 <- felm(earn_t1~Earnings+length+Earnings*length+size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+model31 <- felm(earn_t2~Earnings+length+Earnings*length+size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+
+model32 <- felm(earn_t1~Earnings+mda_length+Earnings*mda_length
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+model33 <- felm(earn_t2~Earnings+mda_length+Earnings*mda_length
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+
+stargazer(
+  model30, model31, model32, model33,
+  type = "text",
+  out = "~/Desktop/t9.txt",
+  title = "Earnings Persistence and Annual Report Length(Profit Firm-Years)",
+  keep = c("Earnings", "length","mda_length","Earnings:length","Earnings:mda_length"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Control variables", "Yes", "Yes","Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2", "Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+
+```
+
+##(C) earnings persistence and annual report Bog (profit firmyears);
+
+```{r,warning=FALSE}
+#| echo: false
+model34 <- felm(earn_t1~Earnings+bogindex+Earnings*bogindex+size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+model35 <- felm(earn_t2~Earnings+bogindex+Earnings*bogindex+size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+
+stargazer(
+  model34, model35,
+  type = "text",
+  out = "~/Desktop/t10.txt",
+  title = "Earnings Persistence and Annual Report Bog index(Profit Firm-Years)",
+  keep = c("Earnings", "bogindex","Earnings:bogindex"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes"),
+    c("Control variables", "Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+```
+
+##(D) earnings persistence and annual report readability (profit firm-years)
+
+```{r,warning=FALSE}
+#| echo: false
+model36 <- felm(earn_t1~Earnings+fog_index+Earnings*fog_index+mda_fog_index+Earnings*mda_fog_index
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+model37 <- felm(earn_t2~Earnings+fog_index+Earnings*fog_index+mda_fog_index+Earnings*mda_fog_index
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+model38 <- felm(earn_t1~Earnings+length+Earnings*length+mda_length+Earnings*mda_length
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+model39 <- felm(earn_t2~Earnings+length+Earnings*length+mda_length+Earnings*mda_length
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp1)
+
+stargazer(
+  model36, model37,model38, model39,
+  type = "text",
+  out = "~/Desktop/t11.txt",
+  title = "Earnings persistence and annual report readability(Profit Firm-Years)",
+  keep = c("Earnings", "fog_index","length","Earnings*fog_index","Earnings*length","mda_fog_index","mda_length","Earnings*mda_fog_index","Earnings*mda_length"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes", "Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes", "Yes", "Yes"),
+    c("Control variables", "Yes", "Yes", "Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2", "Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+```
+
+#Table 5 ##(A) Earnings persistence and annual report Fog index (loss firm-years);
+
+```{r,warning=FALSE}
+#| echo: false
+final_imp0 <- final_imp %>% filter(profit_dummy == 0)
+model40 <- felm(earn_t1~Earnings+fog_index+Earnings*fog_index+size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp0)
+model41 <- felm(earn_t2~Earnings+fog_index+Earnings*fog_index+size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp0)
+
+model42 <- felm(earn_t1~Earnings+mda_fog_index+Earnings*mda_fog_index
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp0)
+model43 <- felm(earn_t2~Earnings+mda_fog_index+Earnings*mda_fog_index
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp0)
+
+stargazer(
+  model40, model41, model42, model43,
+  type = "text",
+  out = "~/Desktop/t12.txt",
+  title = "Earnings Persistence and Annual Report Fog Index (loss Firm-Years)",
+  keep = c("Earnings", "fog_index","mda_fog_index","Earnings:fog_index","Earnings:mda_fog_index"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Control variables", "Yes", "Yes","Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2", "Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+```
+
+##(B) earnings persistence and annual report Length (loss firm-years)
+
+```{r,warning=FALSE}
+#| echo: false
+model44 <- felm(earn_t1~Earnings+length+Earnings*length+size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp0)
+model45 <- felm(earn_t2~Earnings+length+Earnings*length+size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp0)
+
+model46 <- felm(earn_t1~Earnings+mda_length+Earnings*mda_length
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp0)
+model47 <- felm(earn_t2~Earnings+mda_length+Earnings*mda_length
+                +size+mtb+age+si+RET_VOL+EARN_VOL+NBSEG+NGSEG+NITEMS+SEO+MA+DLW|year+sic2|0|sic2,
+                data = final_imp0)
+
+stargazer(
+  model44, model45, model46, model47,
+  type = "text",
+  out = "~/Desktop/t13.txt",
+  title = "Earnings Persistence and Annual Report Length(loss Firm-Years)",
+  keep = c("Earnings", "length","mda_length","Earnings:length","Earnings:mda_length"),
+  report = "vc*t",
+  add.lines = list(
+    c("Year dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Industry dummies", "Yes", "Yes","Yes", "Yes"),
+    c("Control variables", "Yes", "Yes","Yes", "Yes"),
+    c("Cluster", "Sic2", "Sic2", "Sic2", "Sic2")),
+  omit.stat = c("rsq", "ser"),
+  p.auto = TRUE)
+
+```
